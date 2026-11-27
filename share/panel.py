@@ -395,7 +395,7 @@ theme_name = "light"
 accent_name = _prefs.get("accent", "blue")
 if accent_name not in ACCENTS:
     accent_name = "blue"
-version = "0.5.55"
+version = "0.5.56"
 grid_rows = _pref_grid("grid_rows", 4)
 grid_cols = _pref_grid("grid_cols", 5)
 sort_mode = "default"

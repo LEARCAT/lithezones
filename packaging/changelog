@@ -1,3 +1,11 @@
+lithezones (0.5.56) unstable; urgency=high
+
+  * 修复连续点击托盘图标会打开多个管理面板窗口的问题：面板启动期间
+    （Tk 建窗有 1~2 秒延迟）重复点击只切换标签、不再 spawn 新的
+    panel.py，始终只保留一个面板窗口。
+
+ -- 李军 <bodi@localhost>  Fri, 27 Nov 2026 11:35:00 +0800
+
 lithezones (0.5.55) unstable; urgency=high
 
   * 托盘菜单新增「软件更新」：从 Gitee / GitHub Releases 探测新版本，发现

@@ -2,7 +2,7 @@
 
 一个为 **deepin V25 / X11** 编写的轻量窗口排列工具。托盘常驻，点一下就能把当前打开的窗口按预设布局排好，适合多窗口办公、分屏对照和临时整理桌面。
 
-- 当前版本：**0.5.55**
+- 当前版本：**0.5.56**
 - 适用环境：deepin V25、X11 会话、amd64（V25 的 Treeland/Wayland 会话不适用，需登录 X11）
 - 许可证：[GPL-3.0-or-later](LICENSE)
 
@@ -21,13 +21,13 @@
 
 ## 安装
 
-图形方式：双击 `lithezones_0.5.55_amd64.deb`，用系统安装器安装。
+图形方式：双击 `lithezones_0.5.56_amd64.deb`，用系统安装器安装。
 
 命令行方式：
 
 ```bash
 sudo apt install wmctrl python3 python3-tk
-sudo dpkg -i lithezones_0.5.55_amd64.deb
+sudo dpkg -i lithezones_0.5.56_amd64.deb
 ```
 
 如果提示依赖问题：

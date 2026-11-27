@@ -49,6 +49,9 @@ enum PanelUpdate {
 
 struct PanelControl {
     open: Arc<AtomicBool>,
+    /// 面板被标记为打开的时刻。Tk 建窗有 1~2 秒延迟（冷字体查询更久），
+    /// 宽限期内 wmctrl 看不到窗口，重复点击不能据此判定面板已死而再开一个。
+    opened_at: Arc<Mutex<Option<Instant>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     cfg_back: tokio::sync::mpsc::UnboundedSender<PanelUpdate>,
     x: Arc<x11::X11>,
@@ -151,6 +154,11 @@ async fn handle_menu_click(
             // 走下面重新开面板，而不是被卡死的标志骗过去。
             let flagged_open = panel_ctl.open.load(Ordering::Acquire);
             let visible = window_manager_visible();
+            // 面板从标记打开到 Tk 真正建出窗口之间有 1~2 秒（冷字体查询更久），
+            // 这段时间内 wmctrl 还看不到窗口。若据此判定"面板已死"，连续点击会
+            // 反复 spawn 新的 panel.py，出现多个面板窗口。用 opened_at 做启动
+            // 宽限期：宽限期内即使窗口还没出现也只切标签，绝不重开。
+            let just_opened = flagged_open && in_panel_start_grace(&panel_ctl.opened_at);
             if flagged_open && visible {
                 if let Some(s) = panel_ctl.stdin.lock().unwrap().as_mut() {
                     if writeln!(s, "tab\t{}", tab).is_ok() && s.flush().is_ok() {
@@ -169,15 +177,28 @@ async fn handle_menu_click(
                     // stdin 写失败也说明面板已死，落下面的重建逻辑。
                 }
                 panel_ctl.stdin.lock().unwrap().take();
-            }
-            if flagged_open && !visible {
-                crate::vlog!("面板标志为开但窗口已不存在，强制复位并重开");
+            } else if just_opened {
+                // 面板正在启动，窗口尚未出现：只把标签切过去（若 stdin 已就绪），
+                // raiser 线程会在窗口出现后置前；不再 spawn 第二个面板。
+                if let Some(s) = panel_ctl.stdin.lock().unwrap().as_mut() {
+                    let _ = writeln!(s, "tab\t{}", tab);
+                    let _ = s.flush();
+                }
+                crate::vlog!(
+                    "面板启动中（未到 {}s），忽略重复点击",
+                    PANEL_START_GRACE.as_secs()
+                );
+                return Ok(false);
+            } else if flagged_open && !visible {
+                crate::vlog!("面板标志为开但窗口已不存在（已过启动宽限期），强制复位并重开");
                 panel_ctl.open.store(false, Ordering::Release);
+                *panel_ctl.opened_at.lock().unwrap() = None;
                 panel_ctl.stdin.lock().unwrap().take();
             }
             crate::vlog!("打开统一面板 tab={}, 候选窗口 {} 个", tab, pool.len());
             panel_ctl.self_minimized.store(false, Ordering::Release);
             panel_ctl.open.store(true, Ordering::Release);
+            *panel_ctl.opened_at.lock().unwrap() = Some(Instant::now());
             let mut owned_cfg = (*cfg).clone();
             let owned_x = panel_ctl.x.clone();
             let owned_pool = pool;
@@ -293,6 +314,9 @@ fn resource_script(name: &str) -> Option<std::path::PathBuf> {
 /// 实测字体缓存失效时，panel.py 的 gsettings/fc-match 冷查询要 2.1 秒，
 /// 原来只等 2 秒会误判"窗口没出现"，把本来正在打开的旧实例杀掉。
 const WM_SHOW_TIMEOUT: Duration = Duration::from_secs(6);
+/// 面板从标记打开到 Tk 窗口真正出现之间的宽限期。
+/// 连续点击托盘时若窗口还没出现，只切标签不再 spawn 新面板，避免多个窗口。
+const PANEL_START_GRACE: Duration = Duration::from_secs(8);
 /// 通知旧实例 Quit 后，等 D-Bus 名称真正释放，避免抢占名称时的竞态。
 const NAME_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -442,6 +466,16 @@ fn window_manager_visible() -> bool {
                 .lines()
                 .any(|l| l.contains("轻格分窗 - 管理面板"))
         })
+        .unwrap_or(false)
+}
+
+/// 面板是否处于「刚标记打开、窗口还没出现」的启动宽限期。
+/// 用它与 wmctrl 可见性共同判断，避免连续点击重复 spawn 面板。
+fn in_panel_start_grace(opened_at: &Arc<Mutex<Option<Instant>>>) -> bool {
+    opened_at
+        .lock()
+        .unwrap()
+        .map(|t| t.elapsed() < PANEL_START_GRACE)
         .unwrap_or(false)
 }
 
@@ -1467,6 +1501,7 @@ async fn main() -> Result<()> {
     let (cfg_tx, mut cfg_rx) = tokio::sync::mpsc::unbounded_channel::<PanelUpdate>();
     let panel_ctl = PanelControl {
         open: Arc::new(AtomicBool::new(false)),
+        opened_at: Arc::new(Mutex::new(None)),
         stdin: Arc::new(Mutex::new(None)),
         cfg_back: cfg_tx,
         x: x.clone(),
@@ -1593,6 +1628,7 @@ async fn main() -> Result<()> {
                     }
                     PanelUpdate::Closed => {
                         panel_ctl.open.store(false, Ordering::Release);
+                        *panel_ctl.opened_at.lock().unwrap() = None;
                     }
                 }
             }
@@ -1661,5 +1697,16 @@ mod tests {
         // 标题里的 TAB/换行以及 US/RS 都必须被去掉，否则面板的逐行协议会错位。
         let field = clean_field("a\tb\nc\rd\u{1f}e\u{1e}f");
         assert_eq!(field, "a b c def");
+    }
+
+    #[test]
+    fn panel_start_grace_prevents_duplicate_spawn() {
+        // 启动宽限期内必须视为「面板正在打开」，连续点击不再 spawn 新面板。
+        let at = Arc::new(Mutex::new(Some(Instant::now())));
+        assert!(in_panel_start_grace(&at));
+        *at.lock().unwrap() = Some(Instant::now() - PANEL_START_GRACE - Duration::from_secs(1));
+        assert!(!in_panel_start_grace(&at));
+        *at.lock().unwrap() = None;
+        assert!(!in_panel_start_grace(&at));
     }
 }
