@@ -284,44 +284,28 @@ async fn handle_menu_click(
             // 本进程只下载：装新版必须先退出旧进程释放名称，安装交给后续的
             // --apply-update 助手进程完成（见主循环的 UpdateReady 分支）。
             //
-            // 全程用同一条可替换通知反馈进度：正在检查 → 下载进度（带进度条）
-            // → 安装中 → 最终结果。用 replaces_id 原地更新，不刷屏。
+            // 只发头尾两条通知：deepin V25 通知中心不渲染 value 进度条，
+            // 且 replaces_id 不会原地替换，逐百分比推送会堆一长串通知卡片。
+            // 头：「正在检查更新…」点击立即反馈；尾：结果一条。下载过程静默。
             let tx = update_tx.clone();
             tokio::task::spawn_blocking(move || {
                 // 1) 点击即反馈：立刻弹「正在检查更新」，避免用户以为没反应
-                let mut id = notify_progress("软件更新", "正在检查更新…", 0, 0).unwrap_or(0);
-                let bump = |pct: u32, id: &mut u32, title: &str, body: String| {
-                    if let Some(new_id) = notify_progress(title, &body, pct, *id) {
-                        *id = new_id;
-                    }
-                };
+                let id = notify_progress("软件更新", "正在检查更新…", 0, 0).unwrap_or(0);
 
-                // 2) 下载阶段：把百分比原地更新到同一条通知
-                let mut progress = |pct: u32| {
-                    bump(
-                        pct,
-                        &mut id,
-                        "正在下载更新",
-                        format!(
-                            "新版本 {} → 下载中 {pct}%",
-                            env!("CARGO_PKG_VERSION")
-                        ),
-                    );
-                };
-
-                let (msg, deb) = updater::prepare_update(env!("CARGO_PKG_VERSION"), Some(&mut progress));
+                // 2) 下载阶段静默，不逐百分比推送通知
+                let (msg, deb) = updater::prepare_update(env!("CARGO_PKG_VERSION"), None);
                 crate::vlog!("软件更新准备: {}", msg);
 
-                match deb {
-                    Some(path) => {
-                        // 3) 下载完成：切到安装阶段提示（助手马上接管）
-                        bump(100, &mut id, "软件更新", format!("{msg}，正在安装…"));
-                        let _ = tx.send(path);
-                    }
-                    None => {
-                        // 4) 已是最新 / 失败：原地更新为最终结果
-                        bump(100, &mut id, "软件更新", msg);
-                    }
+                // 3) 只发一条结果通知（标准桌面替换头那条；deepin 上呈现为头尾两条）
+                let final_msg = if deb.is_some() {
+                    format!("{msg}，正在安装…")
+                } else {
+                    msg
+                };
+                let _ = notify_progress("软件更新", &final_msg, 100, id);
+
+                if let Some(path) = deb {
+                    let _ = tx.send(path);
                 }
             });
         }
@@ -1278,20 +1262,20 @@ fn spawn_current_binary() {
     }
 }
 
-/// 拉起一个脱离会话的等待助手：系统安装器装完新版后由它自动启动程序。
-fn spawn_waiter(version: &str) {
+/// 拉起一个脱离会话的等待助手：系统安装器装完新版后由它启动程序并清理缓存 deb。
+fn spawn_waiter(deb: &std::path::Path) {
     let exe = installed_exe_path();
     let mut cmd = std::process::Command::new("setsid");
     cmd.arg(&exe)
         .arg("--wait-and-start")
-        .arg(version)
+        .arg(deb)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if cmd.spawn().is_err() {
         let _ = std::process::Command::new(&exe)
             .arg("--wait-and-start")
-            .arg(version)
+            .arg(deb)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1299,15 +1283,23 @@ fn spawn_waiter(version: &str) {
     }
 }
 
-/// 最多等 15 分钟，每 2 秒查一次 dpkg 版本；新版本落地后自动拉起程序。
-/// 用户取消安装则超时静默退出，不会留下常驻进程。
-fn wait_for_install_then_start(version: &str) {
+/// 最多等 15 分钟，每 2 秒查一次 dpkg 版本；新版本落地后清理缓存 deb 并自动拉起程序。
+/// 用户取消安装则超时静默退出，不会留下常驻进程（deb 保留供手动安装）。
+fn wait_for_install_then_start(deb: &std::path::PathBuf) {
+    let version = version_from_deb(deb);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     while std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_secs(2));
-        if updater::installed_version().as_deref() == Some(version) {
+        if version
+            .as_deref()
+            .map_or(false, |v| updater::installed_version().as_deref() == Some(v))
+        {
             // 给 dpkg 的配置收尾留一点时间，避免拉起时被替换中的旧二进制影响
             std::thread::sleep(std::time::Duration::from_millis(800));
+            // 安装器已读完 deb，此时清理本次缓存包
+            if let Err(e) = std::fs::remove_file(deb) {
+                eprintln!("[warn] 清理更新缓存失败: {}", e);
+            }
             notify("安装完成，已自动启动轻格分窗");
             spawn_current_binary();
             return;
@@ -1329,10 +1321,10 @@ async fn main() -> Result<()> {
         println!("lithezones {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    // 安装等待助手：系统安装器完成安装后自动拉起新版（见 spawn_waiter）。
+    // 安装等待助手：系统安装器完成安装后清理缓存 deb 并自动拉起新版（见 spawn_waiter）。
     if let Some(pos) = args.iter().position(|a| a == "--wait-and-start") {
-        if let Some(ver) = args.get(pos + 1) {
-            wait_for_install_then_start(ver);
+        if let Some(deb) = args.get(pos + 1) {
+            wait_for_install_then_start(&std::path::PathBuf::from(deb));
         }
         return Ok(());
     }
@@ -1351,10 +1343,8 @@ async fn main() -> Result<()> {
                     spawn_current_binary();
                 }
                 updater::InstallOutcome::OpenedInstaller => {
-                    // 安装器还要用户点几步，交给等待助手，装完自动启动
-                    if let Some(ver) = version_from_deb(&path) {
-                        spawn_waiter(&ver);
-                    }
+                    // 安装器还要用户点几步，交给等待助手：装完清理缓存 deb 并自动启动
+                    spawn_waiter(&path);
                 }
                 updater::InstallOutcome::Failed => {}
             }

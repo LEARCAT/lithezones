@@ -427,7 +427,16 @@ pub fn installed_version() -> Option<String> {
 pub fn apply_downloaded(path: &PathBuf) -> (String, InstallOutcome) {
     let (outcome, msg) = install(path);
     let text = match outcome {
-        InstallOutcome::Installed => format!("更新完成：{}", msg),
+        InstallOutcome::Installed => {
+            // dpkg 已读完 deb 并完成安装，缓存里的安装包不再需要，装完即清。
+            // 只删本次这一份，历史遗留的旧包不在此动。
+            if let Err(e) = fs::remove_file(path) {
+                eprintln!("[warn] 清理更新缓存失败: {}", e);
+            }
+            format!("更新完成：{}", msg)
+        }
+        // 系统安装器仍在读取该 deb，不能删；安装失败时保留供用户手动装。
+        // OpenedInstaller 的清理由 --wait-and-start 助手在装完后负责。
         InstallOutcome::OpenedInstaller | InstallOutcome::Failed => {
             format!("{}, 位置: {}", msg, path.display())
         }

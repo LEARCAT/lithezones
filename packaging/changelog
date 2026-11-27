@@ -1,3 +1,12 @@
+lithezones (0.5.60) unstable; urgency=high
+
+  * 更新安装完成后自动清理缓存 deb：dpkg 直装成功即删，系统安装器场景由
+    等待助手在检测到新版落地后删；安装失败/用户取消则保留供手动安装。
+  * 更新通知改为只发「正在检查」与「结果」两条：deepin V25 通知中心不渲染
+    进度条、replaces_id 不原地替换，逐百分比推送会堆叠通知卡片，下载过程改为静默。
+
+ -- 李军 <bodi@localhost>  Sat, 28 Nov 2026 00:40:00 +0800
+
 lithezones (0.5.59) unstable; urgency=high
 
   * 根治「更新后不自动启动」：改由 deb 安装脚本（postinst）在装包完成后直接拉起托盘，
