@@ -247,16 +247,19 @@ pub mod ids {
     pub const WINDOW_MANAGER: i32 = 50;
     /// 打开统一的「布局管理」窗口（保存 / 加载 / 删除 / 重命名）
     pub const LAYOUT_MANAGER: i32 = 51;
+    /// 软件更新：检查 Gitee / GitHub Release，下载并更新。
+    pub const UPDATE: i32 = 70;
     pub const QUIT: i32 = 99;
 }
 
-/// 托盘菜单：固定四项（窗口排列 / 布局管理 / 开机启动 / 退出软件）。
+/// 托盘菜单：固定五项（窗口排列 / 布局管理 / 开机启动 / 软件更新 / 退出软件）。
 /// 保存、加载、删除、重命名布局全部收进统一的「布局管理」窗口。
 pub fn build_menu_items(_snapshots: &[crate::model::Snapshot], autostart: bool) -> Vec<MenuItem> {
     let mut items = Vec::new();
     items.push(MenuItem::action(ids::WINDOW_MANAGER, "窗口排列"));
     items.push(MenuItem::action(ids::LAYOUT_MANAGER, "布局管理"));
     items.push(MenuItem::check(ids::AUTOSTART, "开机启动", autostart));
+    items.push(MenuItem::action(ids::UPDATE, "软件更新"));
     items.push(MenuItem::action(ids::QUIT, "退出软件"));
     items
 }

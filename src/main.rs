@@ -9,6 +9,7 @@ mod menu;
 mod model;
 mod snapshot;
 mod tray;
+mod updater;
 mod x11;
 
 use anyhow::Result;
@@ -254,6 +255,16 @@ async fn handle_menu_click(
                 "已开启开机启动"
             } else {
                 "已关闭开机启动"
+            });
+        }
+        ids::UPDATE => {
+            // 检查+下载+安装可能耗时几十秒，绝不能卡住托盘主循环。
+            // 放进 blocking 线程池，完成后用桌面通知回报结果。
+            notify("正在检查更新，请稍候…");
+            tokio::task::spawn_blocking(|| {
+                let msg = updater::run_update(env!("CARGO_PKG_VERSION"));
+                crate::vlog!("软件更新结果: {}", msg);
+                notify(&msg);
             });
         }
         ids::QUIT => {

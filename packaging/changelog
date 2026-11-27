@@ -1,3 +1,13 @@
+lithezones (0.5.55) unstable; urgency=high
+
+  * 托盘菜单新增「软件更新」：从 Gitee / GitHub Releases 探测新版本，发现
+    更新后自动下载 deb 并安装。安装依次尝试免密 sudo、pkexec 密码框、
+    系统安装器，密码不经过本程序；检查与下载在后台线程进行，不卡托盘。
+  * 0.5.54 源码已发布到 Gitee 与 GitHub 公开仓库，deb 作为 Release 附件
+    提供，供更新器下载。
+
+ -- 李军 <bodi@localhost>  Fri, 27 Nov 2026 10:20:00 +0800
+
 lithezones (0.5.54) unstable; urgency=high
 
   * 新增「主题」标签页：可选蔚蓝、青绿、紫罗兰、暖橙、朱红、青蓝六种面板
