@@ -1155,6 +1155,15 @@ async fn main() -> Result<()> {
         println!("lithezones {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    // 诊断用：手动跑一次更新检查，打印结果（不下载不安装）。
+    // 验证「有新版提示、无新版静默」逻辑，不必真等上线一个新版。
+    if args.iter().any(|a| a == "--check-update") {
+        match updater::startup_notice(env!("CARGO_PKG_VERSION")) {
+            Some(msg) => println!("需要更新：{}", msg),
+            None => println!("当前已是最新版本 {}，无需更新", env!("CARGO_PKG_VERSION")),
+        }
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--check") {
         let x = x11::X11::connect()?;
         println!("X11 OK, 工作区: {:?}", x.workareas()?);
@@ -1552,6 +1561,15 @@ async fn main() -> Result<()> {
     // 否则旧面板会浮在新版之上，用户永远看到旧配色/旧逻辑。
     close_stale_panel_windows();
     eprintln!("lithezones {} 已启动", env!("CARGO_PKG_VERSION"));
+
+    // 启动时检查一次更新：有新版本弹一次通知，已是最新或网络不可达则完全静默。
+    // 放在真正成为托盘实例之后（上面 return 分支已排除非主实例），每个进程只跑一次；
+    // spawn_blocking 让curl 请求不卡托盘主循环，用户点菜单/面板不受影响。
+    tokio::task::spawn_blocking(|| {
+        if let Some(msg) = updater::startup_notice(env!("CARGO_PKG_VERSION")) {
+            notify(&msg);
+        }
+    });
 
     // 后台预热面板字体缓存：gsettings/fc-match 子进程合计约 1 秒，
     // 放在启动阶段异步做掉，用户点击菜单时面板可直接使用缓存。

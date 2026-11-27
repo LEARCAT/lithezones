@@ -1,3 +1,11 @@
+lithezones (0.5.57) unstable; urgency=high
+
+  * 启动时自动检查一次更新：发现新版本弹一次桌面通知，提示从托盘菜单
+    「软件更新」升级；当前已是最新版本或网络不可达时不弹任何通知。
+  * 新增 --check-update 诊断参数，可在终端手动验证更新探测结果。
+
+ -- 李军 <bodi@localhost>  Fri, 27 Nov 2026 13:45:00 +0800
+
 lithezones (0.5.56) unstable; urgency=high
 
   * 修复连续点击托盘图标会打开多个管理面板窗口的问题：面板启动期间
