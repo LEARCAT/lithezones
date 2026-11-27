@@ -2,7 +2,7 @@
 
 ## Pillow 10.4.0
 
-`share/vendor/PIL/` 内为 Pillow 10.4.0，随包分发以便 deepin V23 上的管理面板直接生成窗口缩略图。原始项目：<https://github.com/python-pillow/Pillow>
+`share/vendor/PIL/` 内为 Pillow 10.4.0，随包分发以便 deepin V25 上的管理面板直接生成窗口缩略图。原始项目：<https://github.com/python-pillow/Pillow>
 
 Pillow 采用 HPND（Historical Permission Notice and Disclaimer）许可：
 

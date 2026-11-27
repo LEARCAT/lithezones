@@ -9,7 +9,7 @@ Installed-Size: 2048
 Description: LitheZones (轻格分窗) - Deepin X11 lightweight window layout tool
  LitheZones（轻格分窗）是托盘常驻的 X11 窗口布局工具。
  托盘常驻的窗口布局小工具，核心为单个 Rust 二进制；管理面板使用系统
- python3 3.12 与 python3-tk（deepin V23 默认不带 python3-tk，安装脚本会提示）。
+ python3 3.12 与 python3-tk（部分精简镜像可能缺 python3-tk，安装脚本会提示）。
  直接读取 EWMH 工作区并调用 wmctrl 落位，提供九种快速布局、命名快照、
  全局快捷键；窗口按自身尺寸约束落入固定网格：可拉伸的填满格子，
  最小尺寸超出格子的按最小值浮窗显示，小窗与固定尺寸窗口在格内居中。
