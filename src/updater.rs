@@ -171,6 +171,36 @@ pub fn check(current: &str) -> Option<Release> {
     }
 }
 
+/// 根据发布信息生成启动提示文案：带版本号、更新说明首行（限长）、菜单入口。
+fn notice_text(release: &Release) -> String {
+    let brief = release
+        .notes
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(50)
+        .collect::<String>();
+    if brief.is_empty() {
+        format!(
+            "发现新版本 {}，可在托盘菜单「软件更新」中升级",
+            release.version
+        )
+    } else {
+        format!(
+            "发现新版本 {}（{}），可在托盘菜单「软件更新」中升级",
+            release.version, brief
+        )
+    }
+}
+
+/// 只检查、不下载不安装的启动提示。有新版本返回给用户看的文案，没有则 None。
+/// 供托盘启动后后台调用：有新版本弹一次通知，没有则完全静默。
+pub fn startup_notice(current: &str) -> Option<String> {
+    let release = check(current)?;
+    Some(notice_text(&release))
+}
+
 /// 缓存目录：~/.cache/lithezones/。
 fn cache_dir() -> Result<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/LEARCAT".to_string());
@@ -327,6 +357,33 @@ mod tests {
             json_deb_url(text).as_deref(),
             Some("https://x/lithezones_0.5.55_amd64.deb")
         );
+    }
+
+    #[test]
+    fn startup_notice_guides_to_menu() {
+        // 提示文案必须带版本号和「软件更新」入口，且只取更新说明第一行。
+        let release = Release {
+            version: "0.5.99".into(),
+            deb_url: None,
+            notes: "修复若干问题\n第二行不应出现在通知里".into(),
+        };
+        let msg = notice_text(&release);
+        assert!(msg.contains("0.5.99"));
+        assert!(msg.contains("软件更新"));
+        assert!(msg.contains("修复若干问题"));
+        assert!(!msg.contains("第二行"));
+    }
+
+    #[test]
+    fn startup_notice_without_notes_still_guides() {
+        let release = Release {
+            version: "0.6.0".into(),
+            deb_url: None,
+            notes: String::new(),
+        };
+        let msg = notice_text(&release);
+        assert!(msg.contains("0.6.0"));
+        assert!(msg.contains("软件更新"));
     }
 }
 
