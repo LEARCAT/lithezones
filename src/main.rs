@@ -108,6 +108,7 @@ async fn handle_menu_click(
     menu_state: &MenuState,
     panel_ctl: &PanelControl,
     conn: &zbus::Connection,
+    update_tx: &mpsc::UnboundedSender<std::path::PathBuf>,
 ) -> anyhow::Result<bool> {
     let mut quit = false;
     crate::vlog!("菜单点击 id={}", id);
@@ -279,13 +280,18 @@ async fn handle_menu_click(
             });
         }
         ids::UPDATE => {
-            // 检查+下载+安装可能耗时几十秒，绝不能卡住托盘主循环。
-            // 放进 blocking 线程池，完成后用桌面通知回报结果。
+            // 检查+下载可能耗时几十秒，放进 blocking 线程，不卡托盘主循环。
+            // 本进程只下载：装新版必须先退出旧进程释放名称，安装交给后续的
+            // --apply-update 助手进程完成（见主循环的 UpdateReady 分支）。
             notify("正在检查更新，请稍候…");
-            tokio::task::spawn_blocking(|| {
-                let msg = updater::run_update(env!("CARGO_PKG_VERSION"));
-                crate::vlog!("软件更新结果: {}", msg);
+            let tx = update_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let (msg, deb) = updater::prepare_update(env!("CARGO_PKG_VERSION"));
+                crate::vlog!("软件更新准备: {}", msg);
                 notify(&msg);
+                if let Some(path) = deb {
+                    let _ = tx.send(path);
+                }
             });
         }
         ids::QUIT => {
@@ -1142,6 +1148,40 @@ fn which(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// 以脱离终端的方式重新启动当前可执行文件（安装后的新二进制）。
+/// setsid 让新进程不随调用方退出而被回收；沙箱里 setsid 不存在时退回直接 spawn。
+fn spawn_current_binary() {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("自动重启失败：无法定位可执行文件: {}", e);
+            return;
+        }
+    };
+    // setsid: 脱离控制终端与进程组，父进程退出后继续存活。
+    if std::process::Command::new("setsid")
+        .arg(&exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .is_ok()
+    {
+        eprintln!("已自动重启新版: {}", exe.display());
+        return;
+    }
+    // 回退：直接 spawn（用户实机有 setsid，这条主要是沙箱兜底）。
+    match std::process::Command::new(&exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_) => eprintln!("已自动重启新版（无 setsid）: {}", exe.display()),
+        Err(e) => eprintln!("自动重启失败: {}", e),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -1153,6 +1193,20 @@ async fn main() -> Result<()> {
     // --version / --check 不需要 D-Bus
     if args.iter().any(|a| a == "--version") {
         println!("lithezones {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    // 更新助手模式：由已经退出的旧进程拉起，脱离 D-Bus，只负责安装 + 启动新版。
+    // 传 --apply-update <deb路径>。旧进程此刻已退出、名称已释放，可以安全替换二进制。
+    if let Some(pos) = args.iter().position(|a| a == "--apply-update") {
+        if let Some(deb) = args.get(pos + 1) {
+            let path = std::path::PathBuf::from(deb);
+            crate::vlog!("更新助手：安装 {}", path.display());
+            let (msg, ok) = updater::apply_downloaded(&path);
+            notify(&msg);
+            if ok {
+                spawn_current_binary();
+            }
+        }
         return Ok(());
     }
     // 诊断用：手动跑一次更新检查，打印结果（不下载不安装）。
@@ -1472,6 +1526,8 @@ async fn main() -> Result<()> {
 
     // 退出通道：Quit() 方法与 Ctrl-C 都能结束主循环。
     let (quit_tx, mut quit_rx) = mpsc::unbounded_channel::<()>();
+    // 更新通道：下载完成后把 deb 路径交给主循环，退出后由助手进程安装。
+    let (update_tx, mut update_rx) = mpsc::unbounded_channel::<std::path::PathBuf>();
     conn.object_server()
         .at(
             APP_PATH,
@@ -1586,14 +1642,23 @@ async fn main() -> Result<()> {
     }
 
     // 菜单点击、快捷键与退出信号主循环
+    // pending_update: 下载完成但尚未安装的 deb。设置后主循环立即退出，
+    // 由退出清理段拉起 --apply-update 助手，避免"旧版运行中就替换二进制"。
+    let mut pending_update: Option<std::path::PathBuf> = None;
     loop {
         tokio::select! {
             Some(id) = click_rx.recv() => {
-                match handle_menu_click(id, &mut cfg, &x, &menu_state, &panel_ctl, &conn).await {
+                match handle_menu_click(id, &mut cfg, &x, &menu_state, &panel_ctl, &conn, &update_tx).await {
                     Ok(true) => break,
                     Ok(false) => {}
                     Err(e) => eprintln!("菜单操作失败: {}", e),
                 }
+            }
+            // 更新包下载完成：记下路径并退出主循环，交给退出清理段的助手进程安装。
+            Some(deb) = update_rx.recv() => {
+                crate::vlog!("更新包已下载，退出旧版后安装: {}", deb.display());
+                pending_update = Some(deb);
+                break;
             }
             Some(action) = hotkey_rx.recv() => {
                 let result = match action {
@@ -1663,6 +1728,32 @@ async fn main() -> Result<()> {
     close_stale_panel_windows();
     let _ = conn.release_name(APP_BUS_NAME).await;
     eprintln!("lithezones 退出");
+
+    // 有待装更新：本进程已完全退出准备（面板关、名称释放），现在拉起独立助手。
+    // 助手只做安装 + 启动新版，不会与本实例争 D-Bus 名称。
+    if let Some(deb) = pending_update {
+        let exe = std::env::current_exe().unwrap_or_else(|_| {
+            std::path::PathBuf::from("/usr/bin/lithezones")
+        });
+        let mut cmd = std::process::Command::new("setsid");
+        cmd.arg(&exe)
+            .arg("--apply-update")
+            .arg(&deb)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if cmd.spawn().is_err() {
+            // 沙箱/无 setsid 环境退回直接 spawn。
+            let _ = std::process::Command::new(&exe)
+                .arg("--apply-update")
+                .arg(&deb)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        }
+        eprintln!("已拉起更新助手安装: {}", deb.display());
+    }
     Ok(())
 }
 

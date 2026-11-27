@@ -1,3 +1,13 @@
+lithezones (0.5.58) unstable; urgency=high
+
+  * 更新源改为 Gitee 为主：从 Gitee releases/latest 的 assets 直接读取 deb
+    下载地址，GitHub 仅作双保险回退；Gitee 取不到时才用 GitHub 补齐。
+  * 启动提示文案改为「发现新版本 X。点击托盘菜单「软件更新」下载安装。」
+  * 更新流程改为：先退出旧版进程、再由独立助手安装 deb、完成后自动启动新版。
+    经系统安装器手动安装的场景不自动重启，避免启动旧版本。
+
+ -- 李军 <bodi@localhost>  Fri, 27 Nov 2026 14:10:00 +0800
+
 lithezones (0.5.57) unstable; urgency=high
 
   * 启动时自动检查一次更新：发现新版本弹一次桌面通知，提示从托盘菜单

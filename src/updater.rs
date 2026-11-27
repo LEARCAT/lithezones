@@ -1,9 +1,10 @@
 //! 软件更新：从 Gitee / GitHub Releases 探测最新版，下载 deb 并安装。
 //!
-//! 设计约束（deepin V23 / 只读根分区 / 无免密 sudo）：
+//! 设计约束（deepin V25 / 只读根分区 / 无免密 sudo）：
 //!   · 版本号比较只认 0.5.x 三段数字，避免 tag 前缀 v 干扰。
-//!   · Gitee Release 没有自定义附件，只能拿版本号；deb 下载地址从
-//!     GitHub Release 的 assets 里取。GitHub 不可用时给出明确提示。
+//!   · Gitee 为主：/releases/latest 的 assets 里带 deb 的 browser_download_url
+//!     （用 /releases/{id}/attach_files 上传）。GitHub 只作双保险回退：
+//!     Gitee 取不到版本或没带 deb 地址时，才用 GitHub 的信息补齐。
 //!   · 安装不追求"零交互"：先试 `sudo -n`（免密环境真静默），失败再
 //!     `pkexec dpkg -i`（弹一次密码框），最后退回 `xdg-open` 让系统
 //!     安装器接管。全程不把密码交给本程序。
@@ -25,9 +26,11 @@ const GITHUB_LATEST: &str =
 pub struct Release {
     /// 纯版本号，如 0.5.55（去掉 v 前缀）。
     pub version: String,
-    /// deb 的匿名下载地址（来自 GitHub assets）。
+    /// deb 的匿名下载地址（优先来自 Gitee assets，缺失时回退 GitHub）。
     pub deb_url: Option<String>,
-    /// 更新说明。
+    /// 更新说明（Release body）。当前启动提示只报版本号不展示它，
+    /// 保留字段供将来「更新详情」复用。
+    #[allow(dead_code)]
     pub notes: String,
 }
 
@@ -132,12 +135,14 @@ fn http_get(url: &str, timeout_secs: u64) -> Option<String> {
     String::from_utf8(out.stdout).ok()
 }
 
-/// 探测最新 Release：Gitee 优先（读版本号快），GitHub 兜底并补充 deb 地址。
+/// 探测最新 Release：Gitee 为主（版本 + deb 地址），GitHub 双保险回退。
 pub fn check(current: &str) -> Option<Release> {
+    // Gitee /releases/latest 的 assets 里带 deb 的 browser_download_url
+    // （发布时用 /releases/{id}/attach_files 上传，匿名可读）。
     let gitee = http_get(GITEE_LATEST, 20).and_then(|t| {
         json_string(&t, "tag_name").map(|v| Release {
             version: v.trim_start_matches('v').to_string(),
-            deb_url: None,
+            deb_url: json_deb_url(&t),
             notes: json_string(&t, "body").unwrap_or_default(),
         })
     });
@@ -150,17 +155,30 @@ pub fn check(current: &str) -> Option<Release> {
         })
     });
 
-    // 优先用 GitHub 的版本（信息更全：带 deb 地址）；Gitee 只作兜底。
-    let mut release = match (github, gitee) {
-        (Some(gh), _) => gh,
-        (None, Some(gt)) => gt,
+    // 两端都查、版本取较高者，避免某一端 Release 落后导致漏报新版。
+    // 版本相同时优先 Gitee 附件（国内下载稳）；缺 deb 地址时用另一侧补齐。
+    let mut release = match (gitee, github) {
+        (Some(gt), Some(gh)) => {
+            let gt_v = parse_version(&gt.version).unwrap_or([0, 0, 0]);
+            let gh_v = parse_version(&gh.version).unwrap_or([0, 0, 0]);
+            if gt_v >= gh_v {
+                let mut r = gt;
+                if r.deb_url.is_none() {
+                    r.deb_url = gh.deb_url;
+                }
+                r
+            } else {
+                gh
+            }
+        }
+        (Some(gt), None) => gt,
+        (None, Some(gh)) => gh,
         (None, None) => return None,
     };
     if release.deb_url.is_none() {
-        // Gitee 没有附件时，按约定拼 GitHub 的标准下载路径。
         let v = &release.version;
         release.deb_url = Some(format!(
-            "https://github.com/LEARCAT/lithezones/releases/download/v{0}/lithezones_{0}_amd64.deb",
+            "https://gitee.com/learcat/lithezones/releases/download/v{0}/lithezones_{0}_amd64.deb",
             v
         ));
     }
@@ -171,27 +189,12 @@ pub fn check(current: &str) -> Option<Release> {
     }
 }
 
-/// 根据发布信息生成启动提示文案：带版本号、更新说明首行（限长）、菜单入口。
+/// 根据发布信息生成启动提示文案：只报版本号 + 引导到托盘菜单，不夹带更新说明。
 fn notice_text(release: &Release) -> String {
-    let brief = release
-        .notes
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .chars()
-        .take(50)
-        .collect::<String>();
-    if brief.is_empty() {
-        format!(
-            "发现新版本 {}，可在托盘菜单「软件更新」中升级",
-            release.version
-        )
-    } else {
-        format!(
-            "发现新版本 {}（{}），可在托盘菜单「软件更新」中升级",
-            release.version, brief
-        )
-    }
+    format!(
+        "发现新版本 {}。点击托盘菜单「软件更新」下载安装。",
+        release.version
+    )
 }
 
 /// 只检查、不下载不安装的启动提示。有新版本返回给用户看的文案，没有则 None。
@@ -210,6 +213,7 @@ fn cache_dir() -> Result<PathBuf> {
 }
 
 /// 下载 deb 到缓存目录，返回本地路径。
+/// 主地址（Gitee 优先）失败时回退 GitHub 标准地址，两端都失败才报错。
 pub fn download(release: &Release) -> Result<PathBuf> {
     let url = release
         .deb_url
@@ -219,21 +223,39 @@ pub fn download(release: &Release) -> Result<PathBuf> {
     let path = cache_dir()?.join(name);
     let tmp = path.with_extension("deb.part");
 
-    let status = Command::new("curl")
-        .args([
-            "-fL",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "300",
-            "-o",
-            &tmp.to_string_lossy(),
-            url,
-        ])
-        .status()
-        .with_context(|| "调用 curl 下载失败（请确认已安装 curl）")?;
-    if !status.success() {
+    let v = &release.version;
+    let fallback = format!(
+        "https://github.com/LEARCAT/lithezones/releases/download/v{0}/lithezones_{0}_amd64.deb",
+        v
+    );
+    let candidates: Vec<&str> = if fallback == *url {
+        vec![url.as_str()]
+    } else {
+        vec![url.as_str(), fallback.as_str()]
+    };
+
+    let mut ok = false;
+    for candidate in candidates {
+        let status = Command::new("curl")
+            .args([
+                "-fL",
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                "300",
+                "-o",
+                &tmp.to_string_lossy(),
+                candidate,
+            ])
+            .status()
+            .with_context(|| "调用 curl 下载失败（请确认已安装 curl）")?;
+        if status.success() {
+            ok = true;
+            break;
+        }
         let _ = fs::remove_file(&tmp);
+    }
+    if !ok {
         bail!("下载失败（网络不可达或下载地址失效）");
     }
     let meta = fs::metadata(&tmp)?;
@@ -245,9 +267,18 @@ pub fn download(release: &Release) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// 安装结果。只有 dpkg 真正把新二进制装上才需要自动重启；
+/// 交给系统安装器的场景 deb 尚未落地，重启只会启动旧版本，必须交给用户手动完成。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallOutcome {
+    Installed,       // sudo -n / pkexec 的 dpkg -i 成功，新二进制已就位
+    OpenedInstaller, // 已打开系统安装器，由用户手动完成，不自动重启
+    Failed,          // 无法自动安装
+}
+
 /// 安装 deb：依次尝试 sudo -n、pkexec、xdg-open。
-/// 返回 (是否成功, 提示文案)。
-pub fn install(path: &PathBuf) -> (bool, String) {
+/// 返回 (安装结果, 提示文案)。
+pub fn install(path: &PathBuf) -> (InstallOutcome, String) {
     let deb = path.to_string_lossy();
 
     // 1) 免密 sudo：真静默。
@@ -259,7 +290,7 @@ pub fn install(path: &PathBuf) -> (bool, String) {
         .map(|s| s.success())
         .unwrap_or(false)
     {
-        return (true, "已更新到新版本，重启程序后生效".to_string());
+        return (InstallOutcome::Installed, "已更新到新版本，即将自动重启".to_string());
     }
 
     // 2) pkexec：弹一次系统密码框，密码不经过本程序。
@@ -269,7 +300,7 @@ pub fn install(path: &PathBuf) -> (bool, String) {
         .map(|s| s.success())
         .unwrap_or(false)
     {
-        return (true, "已更新到新版本，重启程序后生效".to_string());
+        return (InstallOutcome::Installed, "已更新到新版本，即将自动重启".to_string());
     }
 
     // 3) 交给系统安装器（deepin 上通常是 deepin-deb-installer）。
@@ -281,44 +312,43 @@ pub fn install(path: &PathBuf) -> (bool, String) {
             .unwrap_or(false)
         {
             return (
-                true,
-                "deb 已下载，已打开系统安装器，请手动完成安装".to_string(),
+                InstallOutcome::OpenedInstaller,
+                "deb 已下载，已打开系统安装器，请手动完成安装后重启程序".to_string(),
             );
         }
     }
 
-    (false, "更新包已下载，但无法自动安装，请手动安装".to_string())
+    (InstallOutcome::Failed, "更新包已下载，但无法自动安装，请手动安装".to_string())
 }
 
-/// 供菜单点击调用：检查 → 下载 → 安装，全程同步（调用方应放在 spawn_blocking）。
-/// 返回给用户看的通知文案。
-pub fn run_update(current: &str) -> String {
+/// 供菜单点击调用：只检查 + 下载，不做安装。
+/// 安装交给独立的 --apply-update 助手进程：本进程会先退出释放 D-Bus 名称，
+/// 避免"旧版还在运行就被替换二进制"。返回 (通知文案, 下载好的 deb 路径)。
+pub fn prepare_update(current: &str) -> (String, Option<PathBuf>) {
     let release = match check(current) {
         Some(r) => r,
-        None => return "当前已是最新版本，或暂时无法连接更新服务器".to_string(),
+        None => return ("当前已是最新版本，或暂时无法连接更新服务器".to_string(), None),
     };
-    let path = match download(&release) {
-        Ok(p) => p,
-        Err(e) => return format!("下载更新失败：{}", e),
+    match download(&release) {
+        Ok(p) => (
+            format!("已下载新版本 {}，即将退出旧版并安装", release.version),
+            Some(p),
+        ),
+        Err(e) => (format!("下载更新失败：{}", e), None),
+    }
+}
+
+/// 供 --apply-update 助手进程调用：安装已下载的 deb。
+/// 返回 (通知文案, 是否安装成功可以拉起新版)。
+pub fn apply_downloaded(path: &PathBuf) -> (String, bool) {
+    let (outcome, msg) = install(path);
+    let text = match outcome {
+        InstallOutcome::Installed => format!("更新完成：{}", msg),
+        InstallOutcome::OpenedInstaller | InstallOutcome::Failed => {
+            format!("{}, 位置: {}", msg, path.display())
+        }
     };
-    let (ok, msg) = install(&path);
-    if !ok {
-        return format!("{}, 位置: {}", msg, path.display());
-    }
-    // 更新说明可能很长，只取第一行加入通知，避免通知气泡撑爆。
-    let brief = release
-        .notes
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .chars()
-        .take(60)
-        .collect::<String>();
-    if brief.is_empty() {
-        format!("发现新版本 {}：{}", release.version, msg)
-    } else {
-        format!("发现新版本 {}（{}）：{}", release.version, brief, msg)
-    }
+    (text, outcome == InstallOutcome::Installed)
 }
 
 #[cfg(test)]
@@ -360,30 +390,49 @@ mod tests {
     }
 
     #[test]
-    fn startup_notice_guides_to_menu() {
-        // 提示文案必须带版本号和「软件更新」入口，且只取更新说明第一行。
+    fn startup_notice_exact_wording() {
+        // 启动提示必须是规定的一句话，且绝不夹带更新说明正文。
         let release = Release {
             version: "0.5.99".into(),
             deb_url: None,
             notes: "修复若干问题\n第二行不应出现在通知里".into(),
         };
-        let msg = notice_text(&release);
-        assert!(msg.contains("0.5.99"));
-        assert!(msg.contains("软件更新"));
-        assert!(msg.contains("修复若干问题"));
-        assert!(!msg.contains("第二行"));
+        assert_eq!(
+            notice_text(&release),
+            "发现新版本 0.5.99。点击托盘菜单「软件更新」下载安装。"
+        );
     }
 
     #[test]
-    fn startup_notice_without_notes_still_guides() {
+    fn gitee_assets_deb_url_is_parsed() {
+        // Gitee releases/latest 的 assets 结构里应能取出 .deb 下载地址。
+        let text = r#"{"assets":[{"name":"v0.5.57.zip","browser_download_url":"https://gitee.com/x/zip"},{"name":"lithezones_0.5.57_amd64.deb","browser_download_url":"https://gitee.com/x/lithezones_0.5.57_amd64.deb"}]}"#;
+        assert_eq!(
+            json_deb_url(text).as_deref(),
+            Some("https://gitee.com/x/lithezones_0.5.57_amd64.deb")
+        );
+    }
+
+    #[test]
+    fn version_compare_picks_higher_endpoint() {
+        // 两端版本不一致时必须取较高者，防止一端 Release 落后导致漏报。
+        assert!(is_newer("0.5.58", "0.5.57"));
+        assert!(!is_newer("0.5.57", "0.5.58"));
+        // 平手时按 Gitee 优先由 check 的 match 分支处理，这里只锁定比较语义。
+        assert!(!is_newer("0.5.57", "0.5.57"));
+    }
+
+    #[test]
+    fn startup_notice_ignores_notes() {
         let release = Release {
             version: "0.6.0".into(),
             deb_url: None,
-            notes: String::new(),
+            notes: "任意说明文字".into(),
         };
         let msg = notice_text(&release);
         assert!(msg.contains("0.6.0"));
         assert!(msg.contains("软件更新"));
+        assert!(!msg.contains("任意说明文字"));
     }
 }
 
