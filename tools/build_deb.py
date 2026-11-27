@@ -7,24 +7,63 @@
 用法（在项目根目录执行）：
 
     cargo build --release
-    python3 tools/build_deb.py
+    python3 tools/build_deb.py [输出目录]
+
+产物存放约定（与 LitheScape 统一）：
+    本仓库（lithezones-release）是发布仓库，保持「纯源码、零产物」；
+    .deb 一律输出到开发目录 ../dde-layout-rs/，避免同一版本在多处重复存放。
+    需要传参指定其它输出目录时：python3 tools/build_deb.py [输出目录]
+
+    本脚本是唯一一份，发布仓库与开发目录共用（开发目录用
+    ../lithezones-release/tools/build_deb.py 调用），避免两份副本漂移。
+    源码与编译产物位置自动探测，从哪个目录调用都能正常工作。
 """
 import gzip
 import io
 import os
 import shutil
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# 源码根与开发目录：本仓库叫 lithezones-release，开发目录叫 dde-layout-rs。
+REPO_ROOT = ROOT
+DEV_ROOT = ROOT.parent / 'dde-layout-rs'
+
+# 源码与编译产物可能分别在发布仓库或开发目录，逐个探测。
+SRC_ROOT = None
+BINARY = None
+for cand_root in (ROOT, DEV_ROOT):
+    if not (cand_root / 'packaging' / 'control').is_file():
+        continue
+    cand_bin = cand_root / 'target' / 'release' / 'lithezones'
+    if SRC_ROOT is None:
+        SRC_ROOT = cand_root
+    if cand_bin.is_file():
+        BINARY = cand_bin
+        if SRC_ROOT is None or cand_root == ROOT:
+            SRC_ROOT = cand_root
+        break
+if SRC_ROOT is None:
+    sys.exit('找不到源码根目录（packaging/control）')
+if BINARY is None:
+    sys.exit(f'找不到编译产物，请先执行 cargo build --release（应在 {ROOT} 或 {DEV_ROOT}）')
+
+ROOT = SRC_ROOT
+
+# 输出目录：默认为开发目录（唯一存放处），发布仓库内不落 deb。
+OUT_DIR = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else DEV_ROOT
+
 version_line = next(
     line for line in (ROOT / 'packaging/control').read_text().splitlines()
     if line.lower().startswith('version:')
 )
 VERSION = version_line.split(':', 1)[1].strip()
-OUT = ROOT / f'lithezones_{VERSION}_amd64.deb'
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT = OUT_DIR / f'lithezones_{VERSION}_amd64.deb'
 
 tmp_root = ROOT / '.build-tmp'
 tmp_root.mkdir(exist_ok=True)
@@ -42,7 +81,7 @@ def cp(src, dst, mode=0o644):
 
 
 # ---------------- data.tar.gz ----------------
-cp(ROOT / 'target/release/lithezones', DATA / 'usr/bin/lithezones', 0o755)
+cp(BINARY, DATA / 'usr/bin/lithezones', 0o755)
 cp(ROOT / 'packaging/lithezones.desktop',
    DATA / 'usr/share/applications/lithezones.desktop')
 cp(ROOT / 'packaging/copyright', DATA / 'usr/share/doc/lithezones/copyright')
