@@ -1,3 +1,14 @@
+lithezones (0.5.59) unstable; urgency=high
+
+  * 根治「更新后不自动启动」：改由 deb 安装脚本（postinst）在装包完成后直接拉起托盘，
+    不再依赖旧托盘进程或更新助手的代码版本；prerm 只退出托盘、保留更新助手。
+  * 修复 deepin overlay 文件系统下的自更新陷阱：拉起新版不再走 current_exe()
+    （运行中进程指向旧 layer 二进制），固定走 dpkg 安装路径。
+  * 系统安装器安装的场景新增后台等待助手，检测到新版落地后自动拉起程序。
+  * 软件更新增加进度反馈：同一条通知原地更新「正在检查 → 下载进度 → 正在安装」。
+
+ -- 李军 <bodi@localhost>  Fri, 27 Nov 2026 21:35:00 +0800
+
 lithezones (0.5.58) unstable; urgency=high
 
   * 更新源改为 Gitee 为主：从 Gitee releases/latest 的 assets 直接读取 deb

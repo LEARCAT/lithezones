@@ -212,9 +212,24 @@ fn cache_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// 从 curl `-#` 进度输出里解析百分比。
+/// 进度行形如 "#####          52.6%"，以 \r 刷新；取出现的最后一个百分比。
+fn parse_curl_percent(chunk: &str) -> Option<u32> {
+    let mut last = None;
+    for token in chunk.split_whitespace() {
+        if let Some(num) = token.strip_suffix('%') {
+            if let Ok(v) = num.parse::<f32>() {
+                last = Some(v.round() as u32);
+            }
+        }
+    }
+    last
+}
+
 /// 下载 deb 到缓存目录，返回本地路径。
 /// 主地址（Gitee 优先）失败时回退 GitHub 标准地址，两端都失败才报错。
-pub fn download(release: &Release) -> Result<PathBuf> {
+/// progress: 可选进度回调（0-100），用于通知栏原地更新下载进度。
+pub fn download(release: &Release, mut progress: Option<&mut dyn FnMut(u32)>) -> Result<PathBuf> {
     let url = release
         .deb_url
         .as_ref()
@@ -236,9 +251,13 @@ pub fn download(release: &Release) -> Result<PathBuf> {
 
     let mut ok = false;
     for candidate in candidates {
-        let status = Command::new("curl")
+        if candidate.is_empty() {
+            continue;
+        }
+        let mut child = Command::new("curl")
             .args([
                 "-fL",
+                "-#",
                 "--connect-timeout",
                 "10",
                 "--max-time",
@@ -247,8 +266,52 @@ pub fn download(release: &Release) -> Result<PathBuf> {
                 &tmp.to_string_lossy(),
                 candidate,
             ])
-            .status()
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .with_context(|| "调用 curl 下载失败（请确认已安装 curl）")?;
+
+        // 读 stderr 进度（curl 用 \r 刷新），解析百分比并节流回调
+        let has_progress = progress.is_some();
+        if has_progress {
+            if let Some(stderr) = child.stderr.as_mut() {
+                use std::io::Read;
+                let mut buf = [0u8; 4096];
+                let mut acc = String::new();
+                let mut last_report: Option<u32> = None;
+                loop {
+                    match stderr.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            acc.push_str(&String::from_utf8_lossy(&buf[..n]));
+                            if let Some(pct) = parse_curl_percent(&acc) {
+                                // 只在整数百分比变化时回调，避免刷屏
+                                if last_report != Some(pct) {
+                                    last_report = Some(pct);
+                                    if let Some(cb) = progress.as_mut() {
+                                        cb(pct);
+                                    }
+                                }
+                            }
+                            // 控制累加串长度，只保留尾部片段
+                            if acc.len() > 8192 {
+                                acc = acc
+                                    .chars()
+                                    .rev()
+                                    .take(1024)
+                                    .collect::<String>()
+                                    .chars()
+                                    .rev()
+                                    .collect();
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        let status = child
+            .wait()
+            .with_context(|| "等待 curl 结束失败")?;
         if status.success() {
             ok = true;
             break;
@@ -313,7 +376,7 @@ pub fn install(path: &PathBuf) -> (InstallOutcome, String) {
         {
             return (
                 InstallOutcome::OpenedInstaller,
-                "deb 已下载，已打开系统安装器，请手动完成安装后重启程序".to_string(),
+                "deb 已下载，已打开系统安装器，安装完成后将自动启动轻格分窗".to_string(),
             );
         }
     }
@@ -324,12 +387,16 @@ pub fn install(path: &PathBuf) -> (InstallOutcome, String) {
 /// 供菜单点击调用：只检查 + 下载，不做安装。
 /// 安装交给独立的 --apply-update 助手进程：本进程会先退出释放 D-Bus 名称，
 /// 避免"旧版还在运行就被替换二进制"。返回 (通知文案, 下载好的 deb 路径)。
-pub fn prepare_update(current: &str) -> (String, Option<PathBuf>) {
+/// progress: 下载进度回调（0-100），供通知栏原地更新。
+pub fn prepare_update(
+    current: &str,
+    progress: Option<&mut dyn FnMut(u32)>,
+) -> (String, Option<PathBuf>) {
     let release = match check(current) {
         Some(r) => r,
         None => return ("当前已是最新版本，或暂时无法连接更新服务器".to_string(), None),
     };
-    match download(&release) {
+    match download(&release, progress) {
         Ok(p) => (
             format!("已下载新版本 {}，即将退出旧版并安装", release.version),
             Some(p),
@@ -338,9 +405,26 @@ pub fn prepare_update(current: &str) -> (String, Option<PathBuf>) {
     }
 }
 
+/// 读取系统已安装版本，供「等安装器装完再启动」的助手判断。
+pub fn installed_version() -> Option<String> {
+    let out = Command::new("dpkg-query")
+        .args(["-W", "-f=${Version}", "lithezones"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
 /// 供 --apply-update 助手进程调用：安装已下载的 deb。
-/// 返回 (通知文案, 是否安装成功可以拉起新版)。
-pub fn apply_downloaded(path: &PathBuf) -> (String, bool) {
+/// 返回 (通知文案, 安装结果)，由调用方决定立即启动还是等待安装器。
+pub fn apply_downloaded(path: &PathBuf) -> (String, InstallOutcome) {
     let (outcome, msg) = install(path);
     let text = match outcome {
         InstallOutcome::Installed => format!("更新完成：{}", msg),
@@ -348,7 +432,7 @@ pub fn apply_downloaded(path: &PathBuf) -> (String, bool) {
             format!("{}, 位置: {}", msg, path.display())
         }
     };
-    (text, outcome == InstallOutcome::Installed)
+    (text, outcome)
 }
 
 #[cfg(test)]
@@ -433,6 +517,17 @@ mod tests {
         assert!(msg.contains("0.6.0"));
         assert!(msg.contains("软件更新"));
         assert!(!msg.contains("任意说明文字"));
+    }
+
+    #[test]
+    fn curl_percent_parsing() {
+        // curl -# 用 \r 刷新，形如 "#####     52.6%\r#########  100.0%"
+        assert_eq!(parse_curl_percent("###          52.6%"), Some(53));
+        assert_eq!(parse_curl_percent("\r#########  100.0%"), Some(100));
+        assert_eq!(parse_curl_percent("#=#=#"), None);
+        // 取最后一个百分比
+        assert_eq!(parse_curl_percent("  20.0%\r  87.3%"), Some(87));
+        assert_eq!(parse_curl_percent(""), None);
     }
 }
 

@@ -64,4 +64,67 @@ if command -v gsettings >/dev/null 2>&1; then
     esac
 fi
 
+# 安装 / 升级后自动拉起托盘。
+# 背景：软件更新走 dpkg 安装时，旧托盘进程可能仍持有旧二进制的 current_exe()，
+# 由它拉起的助手会跑旧代码而无法启动新版。把启动动作放进 dpkg 的 postinst，
+# 由安装流程直接拉起，不依赖旧进程或助手代码版本，从根本上保证装完就启动。
+start_tray() {
+    # 1) 确定图形会话用户：sudo 用户 > pkexec 用户 > 有 session bus 的普通用户
+    user="${SUDO_USER:-}"
+    if [ -z "$user" ] && [ -n "${PKEXEC_UID:-}" ]; then
+        user=$(getent passwd "$PKEXEC_UID" 2>/dev/null | cut -d: -f1)
+    fi
+    if [ -z "$user" ] || [ "$user" = "root" ]; then
+        for d in /run/user/[0-9]*; do
+            [ -S "$d/bus" ] || continue
+            uid=${d##*/}
+            [ "$uid" -ge 1000 ] 2>/dev/null || continue
+            u=$(getent passwd "$uid" 2>/dev/null | cut -d: -f1)
+            if [ -n "$u" ]; then user="$u"; break; fi
+        done
+    fi
+    [ -n "$user" ] || return 0
+    [ "$user" != "root" ] || return 0
+    uid=$(id -u "$user" 2>/dev/null) || return 0
+    runtime="/run/user/$uid"
+    [ -S "$runtime/bus" ] || return 0  # 无图形会话（纯命令行安装）则跳过
+
+    # 2) DISPLAY：优先从该用户已有进程继承，取不到就用 :0
+    display=""
+    for p in $(pgrep -u "$user" 2>/dev/null | head -40); do
+        d=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^DISPLAY=//p' | head -1)
+        if [ -n "$d" ]; then display="$d"; break; fi
+    done
+    [ -n "$display" ] || display=":0"
+
+    # 3) 幂等：已有实例持有单实例锁就不重复拉起
+    if runuser -u "$user" -- env \
+        DISPLAY="$display" \
+        XDG_RUNTIME_DIR="$runtime" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
+        dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply \
+        /org/freedesktop/DBus org.freedesktop.DBus.GetNameOwner \
+        string:com.lithezones.app >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # 4) 以会话用户身份、脱离控制终端后台启动
+    runuser -u "$user" -- env \
+        DISPLAY="$display" \
+        XDG_RUNTIME_DIR="$runtime" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
+        setsid /usr/bin/lithezones >/dev/null 2>&1 < /dev/null &
+    return 0
+}
+
+case "$1" in
+    configure)
+        # 等 prerm 的 pkill 与 D-Bus 锁释放完成
+        sleep 1
+        start_tray || true
+        ;;
+esac
+
+echo "轻格分窗已安装，托盘将自动启动。"
+
 exit 0

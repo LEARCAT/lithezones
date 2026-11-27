@@ -283,14 +283,45 @@ async fn handle_menu_click(
             // 检查+下载可能耗时几十秒，放进 blocking 线程，不卡托盘主循环。
             // 本进程只下载：装新版必须先退出旧进程释放名称，安装交给后续的
             // --apply-update 助手进程完成（见主循环的 UpdateReady 分支）。
-            notify("正在检查更新，请稍候…");
+            //
+            // 全程用同一条可替换通知反馈进度：正在检查 → 下载进度（带进度条）
+            // → 安装中 → 最终结果。用 replaces_id 原地更新，不刷屏。
             let tx = update_tx.clone();
             tokio::task::spawn_blocking(move || {
-                let (msg, deb) = updater::prepare_update(env!("CARGO_PKG_VERSION"));
+                // 1) 点击即反馈：立刻弹「正在检查更新」，避免用户以为没反应
+                let mut id = notify_progress("软件更新", "正在检查更新…", 0, 0).unwrap_or(0);
+                let bump = |pct: u32, id: &mut u32, title: &str, body: String| {
+                    if let Some(new_id) = notify_progress(title, &body, pct, *id) {
+                        *id = new_id;
+                    }
+                };
+
+                // 2) 下载阶段：把百分比原地更新到同一条通知
+                let mut progress = |pct: u32| {
+                    bump(
+                        pct,
+                        &mut id,
+                        "正在下载更新",
+                        format!(
+                            "新版本 {} → 下载中 {pct}%",
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                    );
+                };
+
+                let (msg, deb) = updater::prepare_update(env!("CARGO_PKG_VERSION"), Some(&mut progress));
                 crate::vlog!("软件更新准备: {}", msg);
-                notify(&msg);
-                if let Some(path) = deb {
-                    let _ = tx.send(path);
+
+                match deb {
+                    Some(path) => {
+                        // 3) 下载完成：切到安装阶段提示（助手马上接管）
+                        bump(100, &mut id, "软件更新", format!("{msg}，正在安装…"));
+                        let _ = tx.send(path);
+                    }
+                    None => {
+                        // 4) 已是最新 / 失败：原地更新为最终结果
+                        bump(100, &mut id, "软件更新", msg);
+                    }
                 }
             });
         }
@@ -1045,6 +1076,51 @@ fn notify(msg: &str) {
     }
 }
 
+/// 发送/更新一条可显示进度条的通知，返回通知 id 供后续原地替换。
+///
+/// 用 gdbus 直接调 org.freedesktop.Notifications.Notify：
+///   · replaces_id 传上次返回的 id，可在同一条通知上更新，不刷屏；
+///   · hints 里的 value(int32) 让支持的服务显示进度条。
+/// percent=0 或解析失败时退回普通 notify（不带进度条）。
+fn notify_progress(title: &str, body: &str, percent: u32, replaces_id: u32) -> Option<u32> {
+    let pct = percent.min(100) as i32;
+    let hints = format!("{{'value': <int32 {pct}>}}");
+    let out = std::process::Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.Notifications",
+            "--object-path",
+            "/org/freedesktop/Notifications",
+            "--method",
+            "org.freedesktop.Notifications.Notify",
+            "轻格分窗",
+            &replaces_id.to_string(),
+            "lithezones",
+            title,
+            body,
+            "@as []",
+            &hints,
+            "10000",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // 输出形如 "(uint32 76,)" —— 提取数字作为下次替换用的 id
+    let text = String::from_utf8_lossy(&out.stdout);
+    let id = text
+        .split("uint32")
+        .nth(1)?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse::<u32>()
+        .ok()?;
+    Some(id)
+}
+
 fn refresh_menu(cfg: &Config, state: &MenuState) -> Result<()> {
     let autostart = autostart_enabled();
     state.set_dark(cfg.is_dark());
@@ -1148,16 +1224,36 @@ fn which(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// 拉起新版的可执行文件路径。
+///
+/// 不能用 current_exe()：deepin 的 /usr 是 overlay 只读挂载，运行中进程的
+/// current_exe() 指向 lower layer 里的旧 inode，即使 dpkg 已把新版本装到上层，
+/// 沿这个路径拉起的仍是旧代码。固定走 dpkg 安装路径才能拿到真正的新二进制。
+/// 开发态（未安装）回退到 current_exe()，方便本地调试。
+fn installed_exe_path() -> std::path::PathBuf {
+    let installed = std::path::PathBuf::from("/usr/bin/lithezones");
+    if installed.exists() {
+        return installed;
+    }
+    std::env::current_exe().unwrap_or(installed)
+}
+
+/// 从 deb 文件名解析版本号：lithezones_0.5.59_amd64.deb -> 0.5.59
+fn version_from_deb(path: &std::path::Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let rest = name.strip_prefix("lithezones_")?;
+    let ver = rest.split('_').next()?.to_string();
+    if ver.is_empty() {
+        None
+    } else {
+        Some(ver)
+    }
+}
+
 /// 以脱离终端的方式重新启动当前可执行文件（安装后的新二进制）。
 /// setsid 让新进程不随调用方退出而被回收；沙箱里 setsid 不存在时退回直接 spawn。
 fn spawn_current_binary() {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("自动重启失败：无法定位可执行文件: {}", e);
-            return;
-        }
-    };
+    let exe = installed_exe_path();
     // setsid: 脱离控制终端与进程组，父进程退出后继续存活。
     if std::process::Command::new("setsid")
         .arg(&exe)
@@ -1182,6 +1278,44 @@ fn spawn_current_binary() {
     }
 }
 
+/// 拉起一个脱离会话的等待助手：系统安装器装完新版后由它自动启动程序。
+fn spawn_waiter(version: &str) {
+    let exe = installed_exe_path();
+    let mut cmd = std::process::Command::new("setsid");
+    cmd.arg(&exe)
+        .arg("--wait-and-start")
+        .arg(version)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if cmd.spawn().is_err() {
+        let _ = std::process::Command::new(&exe)
+            .arg("--wait-and-start")
+            .arg(version)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+}
+
+/// 最多等 15 分钟，每 2 秒查一次 dpkg 版本；新版本落地后自动拉起程序。
+/// 用户取消安装则超时静默退出，不会留下常驻进程。
+fn wait_for_install_then_start(version: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        if updater::installed_version().as_deref() == Some(version) {
+            // 给 dpkg 的配置收尾留一点时间，避免拉起时被替换中的旧二进制影响
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            notify("安装完成，已自动启动轻格分窗");
+            spawn_current_binary();
+            return;
+        }
+    }
+    eprintln!("等待安装超时，未自动启动");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -1195,16 +1329,34 @@ async fn main() -> Result<()> {
         println!("lithezones {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    // 安装等待助手：系统安装器完成安装后自动拉起新版（见 spawn_waiter）。
+    if let Some(pos) = args.iter().position(|a| a == "--wait-and-start") {
+        if let Some(ver) = args.get(pos + 1) {
+            wait_for_install_then_start(ver);
+        }
+        return Ok(());
+    }
     // 更新助手模式：由已经退出的旧进程拉起，脱离 D-Bus，只负责安装 + 启动新版。
     // 传 --apply-update <deb路径>。旧进程此刻已退出、名称已释放，可以安全替换二进制。
     if let Some(pos) = args.iter().position(|a| a == "--apply-update") {
         if let Some(deb) = args.get(pos + 1) {
             let path = std::path::PathBuf::from(deb);
             crate::vlog!("更新助手：安装 {}", path.display());
-            let (msg, ok) = updater::apply_downloaded(&path);
+            let (msg, outcome) = updater::apply_downloaded(&path);
             notify(&msg);
-            if ok {
-                spawn_current_binary();
+            match outcome {
+                updater::InstallOutcome::Installed => {
+                    // dpkg 已真正装好：稍等收尾后立即启动新版
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    spawn_current_binary();
+                }
+                updater::InstallOutcome::OpenedInstaller => {
+                    // 安装器还要用户点几步，交给等待助手，装完自动启动
+                    if let Some(ver) = version_from_deb(&path) {
+                        spawn_waiter(&ver);
+                    }
+                }
+                updater::InstallOutcome::Failed => {}
             }
         }
         return Ok(());
@@ -1731,10 +1883,10 @@ async fn main() -> Result<()> {
 
     // 有待装更新：本进程已完全退出准备（面板关、名称释放），现在拉起独立助手。
     // 助手只做安装 + 启动新版，不会与本实例争 D-Bus 名称。
+    // 用 installed_exe_path() 而非 current_exe()：overlay 下 current_exe 指向旧
+    // layer 二进制，拉起的助手会跑旧代码，装完新版本也启动不起来。
     if let Some(deb) = pending_update {
-        let exe = std::env::current_exe().unwrap_or_else(|_| {
-            std::path::PathBuf::from("/usr/bin/lithezones")
-        });
+        let exe = installed_exe_path();
         let mut cmd = std::process::Command::new("setsid");
         cmd.arg(&exe)
             .arg("--apply-update")
@@ -1817,5 +1969,21 @@ mod tests {
         assert!(!in_panel_start_grace(&at));
         *at.lock().unwrap() = None;
         assert!(!in_panel_start_grace(&at));
+    }
+
+    #[test]
+    fn deb_version_parsing() {
+        // 等待助手靠 deb 文件名里的版本号判断「新版是否已落地」。
+        assert_eq!(
+            version_from_deb(std::path::Path::new(
+                "/home/user/.cache/lithezones/lithezones_0.5.59_amd64.deb"
+            )),
+            Some("0.5.59".to_string())
+        );
+        assert_eq!(
+            version_from_deb(std::path::Path::new("/tmp/lithezones_1.10.0_amd64.deb")),
+            Some("1.10.0".to_string())
+        );
+        assert_eq!(version_from_deb(std::path::Path::new("/tmp/other.deb")), None);
     }
 }

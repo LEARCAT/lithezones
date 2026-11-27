@@ -155,9 +155,13 @@ def make_tar(root, extra_dirs=()):
 data_tar_gz = gzip.compress(make_tar(DATA), compresslevel=9, mtime=0)
 
 # ---------------- control.tar.gz ----------------
-# 成员必须在归档根目录（./control、./postinst），不能放 ./DEBIAN/ 下。
+# 成员必须在归档根目录（./control、./postinst、./prerm），不能放 ./DEBIAN/ 下。
 cp(ROOT / 'packaging/control', CTRL / 'control')
 cp(ROOT / 'packaging/postinst', CTRL / 'postinst', 0o755)
+# prerm 可选：没有就不装（dpkg 允许缺省）。
+_prerm = ROOT / 'packaging/prerm'
+if _prerm.is_file():
+    cp(_prerm, CTRL / 'prerm', 0o755)
 control_tar_gz = gzip.compress(make_tar(CTRL), compresslevel=9, mtime=0)
 
 

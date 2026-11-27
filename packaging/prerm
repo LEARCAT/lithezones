@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+# 退出正在运行的托盘实例，但保留更新助手进程：
+# 助手进程名同样是 lithezones（--apply-update / --wait-and-start），
+# 若一并 kill 会中断"安装后自动启动"的收尾流程。
+for pid in $(pgrep -x lithezones 2>/dev/null || true); do
+    cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+    case "$cmd" in
+        *--apply-update*|*--wait-and-start*) continue ;;
+    esac
+    kill "$pid" 2>/dev/null || true
+done
