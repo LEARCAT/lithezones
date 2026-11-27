@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=轻格分窗
+GenericName=LitheZones
+Comment=Deepin X11 轻量窗口布局工具
+Exec=lithezones --window-manager
+Icon=lithezones
+StartupWMClass=lithezones
+Terminal=false
+Categories=Utility;
+StartupNotify=false

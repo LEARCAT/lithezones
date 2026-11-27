@@ -1,0 +1,16 @@
+/target/
+*.deb
+*.dsc
+*.changes
+*.buildinfo
+.debbuild-*/
+deb*build*/
+.build-tmp*/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.swp
+.DS_Store
+.after_min_fixed.png
+*.png.bak
