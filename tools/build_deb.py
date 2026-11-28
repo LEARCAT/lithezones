@@ -18,6 +18,7 @@
     ../lithezones-release/tools/build_deb.py 调用），避免两份副本漂移。
     源码与编译产物位置自动探测，从哪个目录调用都能正常工作。
 """
+import atexit
 import gzip
 import io
 import os
@@ -68,6 +69,23 @@ OUT = OUT_DIR / f'lithezones_{VERSION}_amd64.deb'
 tmp_root = ROOT / '.build-tmp'
 tmp_root.mkdir(exist_ok=True)
 WORK = Path(tempfile.mkdtemp(prefix=f'deb-{VERSION}-', dir=tmp_root))
+
+
+def _cleanup_work():
+    # 每次拆包暂存约 17MB；打完（或中途失败）即删，避免历史版本反复堆积。
+    # 某些沙箱会拦截 shutil.rmtree，兜底走系统 rm（绕过 Python 层的包装）。
+    if not WORK.exists():
+        return
+    shutil.rmtree(WORK, ignore_errors=True)
+    if WORK.exists():
+        import subprocess
+        subprocess.run(['/usr/bin/rm', '-rf', str(WORK)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       check=False)
+
+
+atexit.register(_cleanup_work)
+
 DATA = WORK / 'data'
 CTRL = WORK / 'ctrl'
 DATA.mkdir(parents=True)
@@ -97,9 +115,15 @@ for size in (14, 16, 22, 24, 32, 48):
            DATA / 'usr/share/icons/hicolor' / f'{size}x{size}' / 'apps'
            / f'dde-layout-status-{theme}.png')
 
+# deepin V25 默认图标主题是 bloom，且 hicolor 被 excluded-icon-themes 排除。
+# 只装 hicolor 时 dock 拿不到原生尺寸图标，会退去缩放低分辨率图 → 边缘发虚。
+# 因此同一批 PNG 同时装进 bloom 的 apps/<size>/（bloom 用无 x 的目录名）。
 for size in (16, 24, 32, 48, 64, 128):
     cp(ROOT / 'assets/app-icons' / f'lithezones-{size}.png',
        DATA / 'usr/share/icons/hicolor' / f'{size}x{size}' / 'apps'
+       / 'lithezones.png')
+    cp(ROOT / 'assets/app-icons' / f'lithezones-{size}.png',
+       DATA / 'usr/share/icons/bloom' / 'apps' / str(size)
        / 'lithezones.png')
 
 scalable = DATA / 'usr/share/icons/hicolor/scalable/apps'

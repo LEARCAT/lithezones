@@ -341,7 +341,16 @@ const PANEL_START_GRACE: Duration = Duration::from_secs(8);
 /// 通知旧实例 Quit 后，等 D-Bus 名称真正释放，避免抢占名称时的竞态。
 const NAME_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// 关闭所有残留的「轻格分窗 - 管理面板」窗口。
+/// 面板窗口标题。0.5.61 起改为「LitheZones管理面板」；旧标题仍保留识别，
+/// 用于升级时清理旧版残留面板（否则用户装了新版仍看到旧界面）。
+const PANEL_TITLE: &str = "LitheZones管理面板";
+const PANEL_TITLE_LEGACY: &str = "轻格分窗 - 管理面板";
+
+fn is_panel_title(line: &str) -> bool {
+    line.contains(PANEL_TITLE) || line.contains(PANEL_TITLE_LEGACY)
+}
+
+/// 关闭所有残留的管理面板窗口。
 ///
 /// Quit() 只结束 Rust 主循环；tkinter 面板是被 spawn 的独立进程，父进程退出后
 /// 它常变成孤儿窗口继续留在桌面。旧实例被抢占后，这个旧面板（旧配色/旧逻辑）
@@ -353,7 +362,7 @@ fn close_stale_panel_windows() {
         Err(_) => return,
     };
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if !line.contains("轻格分窗 - 管理面板") {
+        if !is_panel_title(line) {
             continue;
         }
         if let Some(id) = line.split_whitespace().next() {
@@ -384,7 +393,7 @@ fn find_panel_window() -> Option<String> {
     let text = String::from_utf8_lossy(&out.stdout);
     let mut best: Option<(u32, String)> = None;
     for line in text.lines() {
-        if !line.contains("轻格分窗 - 管理面板") {
+        if !is_panel_title(line) {
             continue;
         }
         let id = line.split_whitespace().next().unwrap_or("");
@@ -485,7 +494,7 @@ fn window_manager_visible() -> bool {
         .map(|o| {
             String::from_utf8_lossy(&o.stdout)
                 .lines()
-                .any(|l| l.contains("轻格分窗 - 管理面板"))
+                .any(|l| is_panel_title(l))
         })
         .unwrap_or(false)
 }
@@ -1222,7 +1231,7 @@ fn installed_exe_path() -> std::path::PathBuf {
     std::env::current_exe().unwrap_or(installed)
 }
 
-/// 从 deb 文件名解析版本号：lithezones_0.5.59_amd64.deb -> 0.5.59
+/// 从 deb 文件名解析版本号：lithezones_0.5.61_amd64.deb -> 0.5.61
 fn version_from_deb(path: &std::path::Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     let rest = name.strip_prefix("lithezones_")?;
@@ -1966,9 +1975,9 @@ mod tests {
         // 等待助手靠 deb 文件名里的版本号判断「新版是否已落地」。
         assert_eq!(
             version_from_deb(std::path::Path::new(
-                "/home/user/.cache/lithezones/lithezones_0.5.59_amd64.deb"
+                "/home/user/.cache/lithezones/lithezones_0.5.61_amd64.deb"
             )),
-            Some("0.5.59".to_string())
+            Some("0.5.61".to_string())
         );
         assert_eq!(
             version_from_deb(std::path::Path::new("/tmp/lithezones_1.10.0_amd64.deb")),

@@ -39,10 +39,23 @@ fi
 # 想要开机启动时，用户在托盘菜单点「开机启动」，由 toggle_autostart 创建。
 
 # 刷新图标主题缓存，让 deepin dock / 启动器立即识别 lithezones 应用图标。
-# 某些环境没有 gtk-update-icon-cache，静默跳过即可（SVG/PNG 仍在，重启登录也会重建）。
+# deepin V25 默认主题是 bloom（hicolor 被 excluded-icon-themes 排除），
+# 两个主题都要刷；只刷 hicolor 会让 dock 拿低分辨率 fallback，图标发虚。
+# 某些环境没有 gtk-update-icon-cache，静默跳过即可（PNG 仍在，重启登录也会重建）。
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/bloom 2>/dev/null || true
     gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
 fi
+
+# 清掉 DDE 启动器/dock 的旧图标缓存，避免升级后仍显示旧的模糊图标。
+# 覆盖 SUDO_USER 与当前用户；目录不存在则跳过。
+for _u in "${SUDO_USER:-}" "$(id -un)"; do
+    [ -n "$_u" ] || continue
+    _h=$(getent passwd "$_u" 2>/dev/null | cut -d: -f6)
+    if [ -n "$_h" ] && [ -d "$_h/.cache/deepin/icons" ]; then
+        rm -f "$_h/.cache/deepin/icons/lithezones"* 2>/dev/null || true
+    fi
+done
 
 # deepin 的 dock 收藏应用存在 gsettings docked-apps 列表里（desktop ID）。
 # 旧版 0.5.39 及以前只调了 V20 兼容 API RequestDock（V25 上是空操作），

@@ -395,7 +395,7 @@ theme_name = "light"
 accent_name = _prefs.get("accent", "blue")
 if accent_name not in ACCENTS:
     accent_name = "blue"
-version = "0.5.60"
+version = "0.5.61"
 grid_rows = _pref_grid("grid_rows", 4)
 grid_cols = _pref_grid("grid_cols", 5)
 sort_mode = "default"
@@ -895,7 +895,7 @@ base = [grab_thumb(e[0], e[1], e[2], e[3], e[4]) for e in entries]
 root = tk.Tk(className="lithezones")
 root.withdraw()
 SW, SH = root.winfo_screenwidth(), root.winfo_screenheight()
-root.title("轻格分窗 - 管理面板")
+root.title("LitheZones管理面板")
 # 让任务栏/dock 把面板当成 LitheZones 应用窗口：设置 WM_CLASS 与启动器一致，
 # 并用启动器图标（同目录 lithezones-panel.png，由 assets/lithezones.svg 生成）
 # 作为窗口图标。否则 WM_CLASS 是默认的 tk/Tk，dock 上要么没图标、要么显示

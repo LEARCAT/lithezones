@@ -1,3 +1,13 @@
+lithezones (0.5.61) unstable; urgency=high
+
+  * 管理面板标题改为「LitheZones管理面板」；窗口识别同时兼容旧标题，
+    升级后能清理旧版残留面板。
+  * 修复 deepin V25 任务栏图标模糊：图标同时装进 bloom 与 hicolor 主题，
+    装包后刷新两套缓存并清理 DDE 图标缓存。
+  * 打包脚本打完自动清理临时暂存，不再堆积历史构建目录（本次回收 182MB）。
+
+ -- 李军 <bodi@localhost>  Sun, 29 Nov 2026 00:30:00 +0800
+
 lithezones (0.5.60) unstable; urgency=high
 
   * 更新安装完成后自动清理缓存 deb：dpkg 直装成功即删，系统安装器场景由
