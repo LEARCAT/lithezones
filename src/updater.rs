@@ -93,21 +93,27 @@ fn json_string(text: &str, key: &str) -> Option<String> {
     None
 }
 
-/// 从 GitHub Release JSON 的 assets 数组里取 .deb 的下载地址。
+/// 从 Release JSON 的 assets 数组里取 .deb 的下载地址。
+/// 必须按「对象」配对 name 与 url，不能用固定窗口回溯：assets 里同时有
+/// deb / 源码 zip / tar.gz，长 body 下窗口会串到相邻对象，把 zip 当 deb 返回。
 fn json_deb_url(text: &str) -> Option<String> {
-    // assets 里每个对象含 "name" 与 "browser_download_url"；
-    // 只在 name 以 .deb 结尾时取紧随其后的下载 URL。
     let mut search_from = 0usize;
     while let Some(rel) = text[search_from..].find("\"browser_download_url\"") {
         let idx = search_from + rel;
-        // 该 URL 前面最近的对象片段里若含 .deb 名称则认为命中。
-        let window_start = idx.saturating_sub(600);
-        let window = &text[window_start..idx];
         let url = json_string(&text[idx..], "browser_download_url")?;
-        if window.rfind("\"name\"").and_then(|p| {
-            json_string(&window[p..], "name")
-        }).map(|n| n.ends_with(".deb")).unwrap_or(false) {
-            return Some(url);
+        if !url.ends_with(".deb") {
+            search_from = idx + "browser_download_url".len() + 1;
+            continue;
+        }
+        // 该 url 所属的 JSON 对象：向前找最近的 '{'，向后找最近的 '}'。
+        let obj_start = text[..idx].rfind('{').unwrap_or(0);
+        let obj_end = text[idx..].find('}').map(|p| idx + p).unwrap_or(text.len());
+        let obj = &text[obj_start..obj_end];
+        // 对象内必须有 name 字段且以 .deb 结尾，防止 body 里的同名串误配。
+        if let Some(pos) = obj.find("\"name\"") {
+            if json_string(&obj[pos..], "name").map(|n| n.ends_with(".deb")).unwrap_or(false) {
+                return Some(url);
+            }
         }
         search_from = idx + "browser_download_url".len() + 1;
     }
@@ -507,6 +513,23 @@ mod tests {
     }
 
     #[test]
+    fn deb_url_not_confused_by_source_archives() {
+        // Gitee 会自动附带源码 zip/tar.gz（在 deb 之后），固定窗口回溯会把
+        // zip/tar.gz 的 URL 当成 deb 返回；必须按对象配对 name 与 url。
+        let body = "更新说明".repeat(120); // 长 body 拉大窗口串位风险
+        let deb = "https://gitee.com/x/lithezones_0.5.61_amd64.deb";
+        let with_tar_after = format!(
+            r#"{{"body":"{body}","assets":[{{"name":"lithezones_0.5.61_amd64.deb","browser_download_url":"{deb}"}},{{"name":"v0.5.61.tar.gz","browser_download_url":"https://gitee.com/x/tar"}}]}}"#
+        );
+        assert_eq!(json_deb_url(&with_tar_after).as_deref(), Some(deb));
+
+        let with_zip_before = format!(
+            r#"{{"body":"{body}","assets":[{{"name":"v0.5.61.zip","browser_download_url":"https://gitee.com/x/zip"}},{{"name":"lithezones_0.5.61_amd64.deb","browser_download_url":"{deb}"}}]}}"#
+        );
+        assert_eq!(json_deb_url(&with_zip_before).as_deref(), Some(deb));
+    }
+
+    #[test]
     fn version_compare_picks_higher_endpoint() {
         // 两端版本不一致时必须取较高者，防止一端 Release 落后导致漏报。
         assert!(is_newer("0.5.58", "0.5.57"));
@@ -551,8 +574,9 @@ mod live_check_tests {
     fn live_release_probe() {
         // 传一个比线上更老的版本，确保 check 返回 Some。
         let r = check("0.0.0").expect("应能探测到线上 Release");
+        // 先打印再断言：解析异常时能直接看到实际拿到的版本与地址。
+        eprintln!("live version={} url={}", r.version, r.deb_url.clone().unwrap_or_default());
         assert!(!r.version.is_empty());
         assert!(r.deb_url.as_ref().map(|u| u.ends_with(".deb")).unwrap_or(false));
-        eprintln!("live version={} url={}", r.version, r.deb_url.unwrap_or_default());
     }
 }

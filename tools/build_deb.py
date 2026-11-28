@@ -206,4 +206,8 @@ with open(OUT, 'wb') as f:
         if len(payload) % 2:
             f.write(b'\n')
 
+# 打完立即显式清理一次（不依赖 atexit，沙箱下 atexit 里的 rmtree 可能被拦截）。
+# atexit 仍保留，用于中途异常退出时兜底。
+_cleanup_work()
+
 print('OUTPUT', OUT, OUT.stat().st_size, 'bytes')
